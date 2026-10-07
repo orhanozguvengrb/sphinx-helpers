@@ -85,6 +85,9 @@ class ManifestMixin:
         self._use_title_attribute = app.config.metadata_use_title_attribute
 
     def get_title(self, doctree):
+        split_title = doctree.attributes.get("split_title")
+        if split_title:
+            return split_title
         meta_title = doctree.attributes.get("title")
         if meta_title and self._use_title_attribute:
             return meta_title
@@ -92,9 +95,16 @@ class ManifestMixin:
             title_node = doctree.next_node(docutils.nodes.title)
             return title_node.astext() if title_node else None
 
+    def get_url(self, docname, doctree):
+        # A split document points at its original page, with an anchor
+        docname = doctree.attributes.get("split_docname", docname)
+        url = f"{self._metadata_base_url}/{docname}.html"
+        anchor = doctree.attributes.get("split_anchor")
+        return f"{url}#{anchor}" if anchor else url
+
     def create_metadata(self, docname, doctree):
         title = self.get_title(doctree)
-        url = f"{self._metadata_base_url}/{docname}.html"
+        url = self.get_url(docname, doctree)
         return {
             "metadataAttributes": {
                 "title": {
@@ -136,5 +146,67 @@ class ManifestMixin:
                 json.dump(metadata, outfile, indent=4, sort_keys=True)
 
 
-class MarkdownBuilder(ManifestMixin, SimpleMarkdownBuilder):
+class SplitMixin:
+    """Write one output document per sub-section of a page. The parts are
+    named {docname}__{anchor} and carry the information needed to point back
+    at the sub-section of the original page (see ManifestMixin)."""
+
+    def __init__(self, app, env):
+        super().__init__(app, env)
+        self._split_sections = app.config.markdown_split_sections
+        self._split_leadin_limit = app.config.markdown_split_leadin_limit
+
+    @staticmethod
+    def child_sections(section):
+        return [c for c in section.children if isinstance(c, docutils.nodes.section)]
+
+    def split_doctree(self, docname, doctree):
+        """Return a list of (docname, doctree) parts, or None if this document
+        should be written as a single file. Only a document with exactly one
+        top level section, whose child sections all have an id, is split."""
+        top_sections = [
+            c for c in doctree.children if isinstance(c, docutils.nodes.section)
+        ]
+        if len(top_sections) != 1:
+            return None
+        children = self.child_sections(top_sections[0])
+        if not children or any(not child["ids"] for child in children):
+            return None
+
+        # With many sections the shared lead-in would be a near-duplicate
+        # wall of text in every part, so keep only the page title
+        keep_leadin = len(children) <= self._split_leadin_limit
+
+        parts = []
+        for child in children:
+            anchor = child["ids"][0]
+            part = doctree.deepcopy()
+            part_top = part.next_node(docutils.nodes.section)
+            part_title = part_top.next_node(docutils.nodes.title)
+            part_top.children = [
+                c
+                for c in part_top.children
+                if c is part_title
+                or (keep_leadin and not isinstance(c, docutils.nodes.section))
+                or (isinstance(c, docutils.nodes.section) and c["ids"] == child["ids"])
+            ]
+            title_node = child.next_node(docutils.nodes.title)
+            part.attributes["split_docname"] = docname
+            part.attributes["split_anchor"] = anchor
+            part.attributes["split_title"] = (
+                title_node.astext() if title_node else None
+            ) or part_title.astext()
+            parts.append((f"{docname}__{anchor}", part))
+        return parts
+
+    def write_doc(self, docname, doctree):
+        parts = self.split_doctree(docname, doctree) if self._split_sections else None
+        if parts is None:
+            super().write_doc(docname, doctree)
+        else:
+            for part_docname, part in parts:
+                super().write_doc(part_docname, part)
+
+
+class MarkdownBuilder(SplitMixin, ManifestMixin, SimpleMarkdownBuilder):
     pass
