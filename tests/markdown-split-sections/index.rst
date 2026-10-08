@@ -6,3 +6,4 @@ My Project
    few
    many
    single
+   nested

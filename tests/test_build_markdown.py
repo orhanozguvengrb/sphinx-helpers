@@ -138,11 +138,24 @@ def test_markdown_split_sections(app, status, warning):
     shutil.rmtree(output_dir.parent, ignore_errors=True)
     app.build()
 
-    # Pages with sub-sections are replaced by one file per sub-section
-    assert_not_exists(output_dir.joinpath("few.md"))
-    assert_not_exists(output_dir.joinpath("few.md.metadata.json"))
-    assert_not_exists(output_dir.joinpath("many.md"))
-    assert_not_exists(output_dir.joinpath("many.md.metadata.json"))
+    # Pages with sub-sections are written as one file for the page itself (its
+    # title and own content, with the url of the page) and one per sub-section
+    for docname in ["few", "many"]:
+        assert_exists(output_dir.joinpath(f"{docname}.md"))
+        content = output_dir.joinpath(f"{docname}.md").read_text()
+        expected_content = reference_dir.joinpath(f"{docname}.md").read_text()
+        assert content == expected_content
+
+        metadata = json.loads(
+            output_dir.joinpath(f"{docname}.md.metadata.json").read_text()
+        )
+        attributes = metadata["metadataAttributes"]
+        title = attributes["title"]["value"]["stringValue"]
+        assert title == f"{docname.title()} Sections"
+        assert (
+            attributes["x-amz-bedrock-kb-source-uri"]["value"]["stringValue"]
+            == f"/path/to/site_root/{docname}.html"
+        )
 
     # A page without sub-sections is unchanged
     assert_exists(output_dir.joinpath("single.md"))
@@ -229,3 +242,77 @@ def test_markdown_split_sections_with_header(app, status, warning):
         """
     ).lstrip()
     assert content == expected_header + expected_body
+
+
+@pytest.mark.sphinx(
+    buildername="markdown",
+    testroot=here / "markdown-split-sections",
+    confoverrides={"markdown_split_leadin_limit": 20},
+)
+def test_markdown_split_sections_nested(app, status, warning):
+    output_dir = pathlib.Path(app.outdir)
+    assert output_dir.parts[-2] == "_build"
+    assert output_dir.parts[-1] == "markdown"
+
+    shutil.rmtree(output_dir.parent, ignore_errors=True)
+    app.build()
+
+    # Sub-sections are split at every depth. Each part has the sections
+    # leading to it with their content, and its own content only
+    anchors = ["outer", "inner-one", "inner-two", "deepest", "sibling"]
+    for part in ["nested"] + [f"nested__{a}" for a in anchors]:
+        assert_exists(output_dir.joinpath(f"{part}.md"))
+        assert_exists(output_dir.joinpath(f"{part}.md.metadata.json"))
+
+        content = output_dir.joinpath(f"{part}.md").read_text()
+        expected_content = reference_dir.joinpath(f"{part}.md").read_text()
+        assert content == expected_content
+
+    # A section with no content of its own is not written
+    assert_not_exists(output_dir.joinpath("nested__empty-parent.md"))
+    assert_not_exists(output_dir.joinpath("nested__empty-parent.md.metadata.json"))
+
+    metadata = json.loads(
+        output_dir.joinpath("nested__deepest.md.metadata.json").read_text()
+    )
+    attributes = metadata["metadataAttributes"]
+    assert attributes["title"]["value"]["stringValue"] == "Deepest"
+    assert (
+        attributes["x-amz-bedrock-kb-source-uri"]["value"]["stringValue"]
+        == "/path/to/site_root/nested.html#deepest"
+    )
+
+
+@pytest.mark.sphinx(
+    buildername="markdown",
+    testroot=here / "markdown-split-sections",
+    confoverrides={"markdown_split_leadin_limit": 1},
+)
+def test_markdown_split_sections_nested_many(app, status, warning):
+    output_dir = pathlib.Path(app.outdir)
+    assert output_dir.parts[-2] == "_build"
+    assert output_dir.parts[-1] == "markdown"
+
+    shutil.rmtree(output_dir.parent, ignore_errors=True)
+    app.build()
+
+    # The page and "Outer" each have 2 sub-sections, more than the limit of 1,
+    # so their content is dropped and only their titles are kept. "Inner Two"
+    # has a single sub-section, so its content is kept.
+    content = output_dir.joinpath("nested__deepest.md").read_text()
+    expected_content = textwrap.dedent(
+        """
+        # Nested Page
+
+        ## Outer
+
+        ### Inner Two
+
+        Text of inner two.
+
+        #### Deepest
+
+        Text of deepest.
+        """
+    ).lstrip()
+    assert content == expected_content

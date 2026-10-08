@@ -147,9 +147,20 @@ class ManifestMixin:
 
 
 class SplitMixin:
-    """Write one output document per sub-section of a page. The parts are
-    named {docname}__{anchor} and carry the information needed to point back
-    at the sub-section of the original page (see ManifestMixin)."""
+    """Write one output document per sub-section of a page, at any depth. The
+    parts are named {docname}__{anchor} and carry the information needed to
+    point back at the sub-section of the original page (see ManifestMixin).
+
+    The page itself is a part too, written as {docname} with the url of the
+    page: its title and its own content.
+
+    A part holds the sections leading to the sub-section (the page, then each
+    parent in turn) with their own content, and the sub-section itself with
+    its own content: h1 + h2 + h3 for an h3. The content of the child sections
+    of the sub-section, and of sibling sections, is left to their own parts.
+    A parent with many sub-sections (more than markdown_split_leadin_limit)
+    would have its content repeated in every one of their parts, so for such a
+    parent only the title is kept."""
 
     def __init__(self, app, env):
         super().__init__(app, env)
@@ -160,43 +171,84 @@ class SplitMixin:
     def child_sections(section):
         return [c for c in section.children if isinstance(c, docutils.nodes.section)]
 
+    @staticmethod
+    def own_content(section):
+        return [
+            c
+            for c in section.children
+            if not isinstance(c, (docutils.nodes.section, docutils.nodes.title))
+        ]
+
+    def descendants(self, section, chain=()):
+        """Yield (chain, section) for every section below the given one, where
+        chain is the sections leading to it, starting with the given one."""
+        chain = chain + (section,)
+        for child in self.child_sections(section):
+            yield chain, child
+            yield from self.descendants(child, chain)
+
     def split_doctree(self, docname, doctree):
         """Return a list of (docname, doctree) parts, or None if this document
         should be written as a single file. Only a document with exactly one
-        top level section, whose child sections all have an id, is split."""
+        top level section, whose sub-sections all have an id, is split."""
         top_sections = [
             c for c in doctree.children if isinstance(c, docutils.nodes.section)
         ]
         if len(top_sections) != 1:
             return None
-        children = self.child_sections(top_sections[0])
-        if not children or any(not child["ids"] for child in children):
+        found = list(self.descendants(top_sections[0]))
+        if not found or any(not section["ids"] for _, section in found):
             return None
 
-        # With many sections the shared lead-in would be a near-duplicate
-        # wall of text in every part, so keep only the page title
-        keep_leadin = len(children) <= self._split_leadin_limit
+        # A section with no content of its own (only sub-sections) is left out
+        found = [(c, s) for c, s in found if self.own_content(s)]
+        if not found:
+            return None
+
+        # The page itself is a part too (its title and own content), so every
+        # section has exactly one file and the lead-in is not lost
+        top = top_sections[0]
+        if self.own_content(top):
+            found.insert(0, ((), top))
+
+        def locate(tree, section):
+            return tree.next_node(
+                lambda n: isinstance(n, docutils.nodes.section)
+                and n["ids"][:1] == section["ids"][:1]
+            )
 
         parts = []
-        for child in children:
-            anchor = child["ids"][0]
+        for chain, section in found:
             part = doctree.deepcopy()
-            part_top = part.next_node(docutils.nodes.section)
-            part_title = part_top.next_node(docutils.nodes.title)
-            part_top.children = [
+            path = [part.next_node(docutils.nodes.section)]
+            if chain:
+                path += [locate(part, s) for s in chain[1:] + (section,)]
+
+            # Sections leading to the sub-section keep their own content, or
+            # only their title if they have many sub-sections. The sub-section
+            # keeps its own content. (chain holds the original parents.)
+            for parent, node, next_node in zip(chain, path, path[1:]):
+                title = node.next_node(docutils.nodes.title)
+                few = len(self.child_sections(parent)) <= self._split_leadin_limit
+                context = self.own_content(node) if few else []
+                node.children = [title, *context, next_node]
+            path[-1].children = [
                 c
-                for c in part_top.children
-                if c is part_title
-                or (keep_leadin and not isinstance(c, docutils.nodes.section))
-                or (isinstance(c, docutils.nodes.section) and c["ids"] == child["ids"])
+                for c in path[-1].children
+                if not isinstance(c, docutils.nodes.section)
             ]
-            title_node = child.next_node(docutils.nodes.title)
+
+            title_node = section.next_node(docutils.nodes.title)
+            part_title = path[0].next_node(docutils.nodes.title)
             part.attributes["split_docname"] = docname
-            part.attributes["split_anchor"] = anchor
             part.attributes["split_title"] = (
                 title_node.astext() if title_node else None
             ) or part_title.astext()
-            parts.append((f"{docname}__{anchor}", part))
+            if chain:
+                part.attributes["split_anchor"] = section["ids"][0]
+                parts.append((f"{docname}__{section['ids'][0]}", part))
+            else:
+                parts.append((docname, part))
         return parts
 
     def write_doc(self, docname, doctree):
