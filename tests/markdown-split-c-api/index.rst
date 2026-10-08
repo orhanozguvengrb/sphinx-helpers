@@ -1,0 +1,6 @@
+My Project
+==========
+
+.. toctree::
+
+   callback

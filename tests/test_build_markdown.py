@@ -316,3 +316,74 @@ def test_markdown_split_sections_nested_many(app, status, warning):
         """
     ).lstrip()
     assert content == expected_content
+
+
+@pytest.mark.sphinx(buildername="markdown", testroot=here / "markdown-split-sections")
+def test_markdown_split_sections_objects(app, status, warning):
+    output_dir = pathlib.Path(app.outdir)
+    assert output_dir.parts[-2] == "_build"
+    assert output_dir.parts[-1] == "markdown"
+
+    shutil.rmtree(output_dir.parent, ignore_errors=True)
+    app.build()
+
+    # Object descriptions with an anchor (functions, classes, methods) are
+    # split like sections, and can be nested
+    expected = {
+        "api": ("API Page", "api.html"),
+        "api__c.api_one": ("api_one", "api.html#c.api_one"),
+        "api__c.api_two": ("api_two", "api.html#c.api_two"),
+        "api__Widget": ("Widget", "api.html#Widget"),
+        "api__Widget.run": ("run", "api.html#Widget.run"),
+    }
+    for part, (title, url) in expected.items():
+        assert_exists(output_dir.joinpath(f"{part}.md"))
+
+        content = output_dir.joinpath(f"{part}.md").read_text()
+        expected_content = reference_dir.joinpath(f"{part}.md").read_text()
+        assert content == expected_content
+
+        metadata = json.loads(
+            output_dir.joinpath(f"{part}.md.metadata.json").read_text()
+        )
+        attributes = metadata["metadataAttributes"]
+        assert attributes["title"]["value"]["stringValue"] == title
+        assert (
+            attributes["x-amz-bedrock-kb-source-uri"]["value"]["stringValue"]
+            == f"/path/to/site_root/{url}"
+        )
+
+
+@pytest.mark.sphinx(buildername="markdown", testroot=here / "markdown-split-c-api")
+def test_markdown_split_sections_c_api(app, status, warning):
+    output_dir = pathlib.Path(app.outdir)
+    assert output_dir.parts[-2] == "_build"
+    assert output_dir.parts[-1] == "markdown"
+
+    shutil.rmtree(output_dir.parent, ignore_errors=True)
+    app.build()
+
+    # The page has no sections, only function entries (modelled on the C
+    # callback reference page). The page has no text of its own, so it has
+    # no file; each function has one, with the url of its anchor.
+    assert_not_exists(output_dir.joinpath("callback.md"))
+    assert_not_exists(output_dir.joinpath("callback.md.metadata.json"))
+
+    base_url = "https://docs.gurobi.com/projects/optimizer/en/current/reference/c"
+    for name in ["GRBcbsetdblparam", "GRBcbsetintparam", "GRBcbcut", "GRBterminate"]:
+        part = f"callback__c.{name}"
+        assert_exists(output_dir.joinpath(f"{part}.md"))
+
+        content = output_dir.joinpath(f"{part}.md").read_text()
+        expected_content = reference_dir.joinpath(f"{part}.md").read_text()
+        assert content == expected_content
+
+        metadata = json.loads(
+            output_dir.joinpath(f"{part}.md.metadata.json").read_text()
+        )
+        attributes = metadata["metadataAttributes"]
+        assert attributes["title"]["value"]["stringValue"] == name
+        assert (
+            attributes["x-amz-bedrock-kb-source-uri"]["value"]["stringValue"]
+            == f"{base_url}/callback.html#c.{name}"
+        )

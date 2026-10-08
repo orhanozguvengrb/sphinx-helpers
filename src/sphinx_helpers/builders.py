@@ -3,6 +3,7 @@ import pathlib
 
 import docutils.nodes
 import yaml
+from sphinx import addnodes
 from sphinx.builders.text import TextBuilder
 from sphinx.util.logging import getLogger
 from sphinx.writers.text import TextTranslator
@@ -151,6 +152,10 @@ class SplitMixin:
     parts are named {docname}__{anchor} and carry the information needed to
     point back at the sub-section of the original page (see ManifestMixin).
 
+    A sub-section is a section, or an object description with an anchor (a
+    function, class or method documented with a domain directive such as
+    c:function), which can be nested in another one.
+
     The page itself is a part too, written as {docname} with the url of the
     page: its title and its own content.
 
@@ -167,23 +172,87 @@ class SplitMixin:
         self._split_sections = app.config.markdown_split_sections
         self._split_leadin_limit = app.config.markdown_split_leadin_limit
 
-    @staticmethod
-    def child_sections(section):
-        return [c for c in section.children if isinstance(c, docutils.nodes.section)]
+    # Nodes that are not rendered, so they are not content by themselves
+    invisible = (
+        addnodes.index,
+        docutils.nodes.target,
+        docutils.nodes.comment,
+        docutils.nodes.substitution_definition,
+    )
 
     @staticmethod
-    def own_content(section):
+    def signatures(node):
+        return [c for c in node.children if isinstance(c, addnodes.desc_signature)]
+
+    def unit_id(self, node):
+        """The anchor of a section, or of an object description"""
+        if isinstance(node, addnodes.desc):
+            signatures = self.signatures(node)
+            ids = signatures[0]["ids"] if signatures else []
+        else:
+            ids = node["ids"]
+        return ids[0] if ids else None
+
+    def is_unit(self, node):
+        if isinstance(node, docutils.nodes.section):
+            return True
+        # An object description without an anchor stays part of its parent
+        return isinstance(node, addnodes.desc) and self.unit_id(node) is not None
+
+    @staticmethod
+    def container(node):
+        """The node holding the content (and child units) of a unit"""
+        if isinstance(node, addnodes.desc):
+            for child in node.children:
+                if isinstance(child, addnodes.desc_content):
+                    return child
+            return None
+        return node
+
+    def child_units(self, node):
+        container = self.container(node)
+        children = container.children if container is not None else []
+        return [c for c in children if self.is_unit(c)]
+
+    def own_content(self, node):
+        container = self.container(node)
+        children = container.children if container is not None else []
         return [
             c
-            for c in section.children
-            if not isinstance(c, (docutils.nodes.section, docutils.nodes.title))
+            for c in children
+            if not self.is_unit(c)
+            and not isinstance(c, (docutils.nodes.title, *self.invisible))
         ]
 
-    def descendants(self, section, chain=()):
-        """Yield (chain, section) for every section below the given one, where
-        chain is the sections leading to it, starting with the given one."""
-        chain = chain + (section,)
-        for child in self.child_sections(section):
+    def unit_title(self, node):
+        if isinstance(node, addnodes.desc):
+            signature = self.signatures(node)[0]
+            parts = [
+                signature.next_node(addnodes.desc_addname),
+                signature.next_node(addnodes.desc_name),
+            ]
+            title = "".join(p.astext() for p in parts if p is not None)
+            return title or signature.astext()
+        title_node = node.next_node(docutils.nodes.title)
+        return title_node.astext() if title_node else None
+
+    def rebuild(self, node, content):
+        """Keep the heading of a unit (its title or signatures) and replace
+        its content"""
+        container = self.container(node)
+        if isinstance(node, addnodes.desc):
+            heading = self.signatures(node)
+            if container is not None:
+                container.children = content
+            node.children = heading + ([container] if container is not None else [])
+        else:
+            node.children = [node.next_node(docutils.nodes.title), *content]
+
+    def descendants(self, unit, chain=()):
+        """Yield (chain, unit) for every unit below the given one, where chain
+        is the units leading to it, starting with the given one."""
+        chain = chain + (unit,)
+        for child in self.child_units(unit):
             yield chain, child
             yield from self.descendants(child, chain)
 
@@ -197,11 +266,11 @@ class SplitMixin:
         if len(top_sections) != 1:
             return None
         found = list(self.descendants(top_sections[0]))
-        if not found or any(not section["ids"] for _, section in found):
+        if not found or any(self.unit_id(unit) is None for _, unit in found):
             return None
 
-        # A section with no content of its own (only sub-sections) is left out
-        found = [(c, s) for c, s in found if self.own_content(s)]
+        # A unit with no content of its own (only sub-sections) is left out
+        found = [(c, u) for c, u in found if self.own_content(u)]
         if not found:
             return None
 
@@ -211,42 +280,36 @@ class SplitMixin:
         if self.own_content(top):
             found.insert(0, ((), top))
 
-        def locate(tree, section):
+        def locate(tree, unit):
             return tree.next_node(
-                lambda n: isinstance(n, docutils.nodes.section)
-                and n["ids"][:1] == section["ids"][:1]
+                lambda n: self.is_unit(n) and self.unit_id(n) == self.unit_id(unit)
             )
 
         parts = []
-        for chain, section in found:
+        for chain, unit in found:
             part = doctree.deepcopy()
             path = [part.next_node(docutils.nodes.section)]
             if chain:
-                path += [locate(part, s) for s in chain[1:] + (section,)]
+                path += [locate(part, u) for u in chain[1:] + (unit,)]
 
-            # Sections leading to the sub-section keep their own content, or
-            # only their title if they have many sub-sections. The sub-section
-            # keeps its own content. (chain holds the original parents.)
+            # Units leading to the sub-section keep their own content, or only
+            # their heading if they have many sub-units. The sub-section keeps
+            # its own content. (chain holds the original parents.)
             for parent, node, next_node in zip(chain, path, path[1:]):
-                title = node.next_node(docutils.nodes.title)
-                few = len(self.child_sections(parent)) <= self._split_leadin_limit
+                few = len(self.child_units(parent)) <= self._split_leadin_limit
                 context = self.own_content(node) if few else []
-                node.children = [title, *context, next_node]
-            path[-1].children = [
-                c
-                for c in path[-1].children
-                if not isinstance(c, docutils.nodes.section)
-            ]
+                self.rebuild(node, [*context, next_node])
+            self.rebuild(path[-1], self.own_content(path[-1]))
 
-            title_node = section.next_node(docutils.nodes.title)
             part_title = path[0].next_node(docutils.nodes.title)
             part.attributes["split_docname"] = docname
             part.attributes["split_title"] = (
-                title_node.astext() if title_node else None
-            ) or part_title.astext()
+                self.unit_title(unit) or part_title.astext()
+            )
             if chain:
-                part.attributes["split_anchor"] = section["ids"][0]
-                parts.append((f"{docname}__{section['ids'][0]}", part))
+                anchor = self.unit_id(unit)
+                part.attributes["split_anchor"] = anchor
+                parts.append((f"{docname}__{anchor}", part))
             else:
                 parts.append((docname, part))
         return parts

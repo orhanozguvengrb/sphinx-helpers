@@ -7,3 +7,4 @@ My Project
    many
    single
    nested
+   api
