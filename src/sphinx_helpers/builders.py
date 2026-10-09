@@ -1,5 +1,7 @@
+import hashlib
 import json
 import pathlib
+import re
 
 import docutils.nodes
 import yaml
@@ -181,6 +183,21 @@ class SplitMixin:
     )
 
     @staticmethod
+    def part_name(docname, anchor, used):
+        """The name of the output document of a sub-section: {docname}__{anchor},
+        made safe to use as a file name. Anchors can hold characters that are
+        not allowed in a file name everywhere (for example "*" in an operator),
+        be very long, or differ only in case (C++ operators). Then the name is
+        cleaned up and ends with a short hash of the anchor, which keeps it
+        unique. The anchor itself is kept as it is in the url."""
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", anchor)[:100]
+        name = f"{docname}__{safe}"
+        if safe != anchor or name.lower() in used:
+            name += "-" + hashlib.sha1(anchor.encode()).hexdigest()[:8]
+        used.add(name.lower())
+        return name
+
+    @staticmethod
     def signatures(node):
         return [c for c in node.children if isinstance(c, addnodes.desc_signature)]
 
@@ -286,6 +303,7 @@ class SplitMixin:
             )
 
         parts = []
+        used = set()
         for chain, unit in found:
             part = doctree.deepcopy()
             path = [part.next_node(docutils.nodes.section)]
@@ -309,7 +327,7 @@ class SplitMixin:
             if chain:
                 anchor = self.unit_id(unit)
                 part.attributes["split_anchor"] = anchor
-                parts.append((f"{docname}__{anchor}", part))
+                parts.append((self.part_name(docname, anchor, used), part))
             else:
                 parts.append((docname, part))
         return parts

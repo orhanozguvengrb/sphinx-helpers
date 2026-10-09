@@ -387,3 +387,38 @@ def test_markdown_split_sections_c_api(app, status, warning):
             attributes["x-amz-bedrock-kb-source-uri"]["value"]["stringValue"]
             == f"{base_url}/callback.html#c.{name}"
         )
+
+
+def test_split_part_name():
+    # Output names must be valid file names everywhere (an artifact upload
+    # rejects "*" and names that differ only in case), and stay unique
+    from sphinx_helpers.builders import SplitMixin
+
+    used = set()
+    name = SplitMixin.part_name
+
+    # A plain anchor is used as it is
+    assert name("page", "continuous-variables", used) == "page__continuous-variables"
+    assert name("callback", "c.GRBcbcut", used) == "callback__c.GRBcbcut"
+
+    # Characters that are not allowed are replaced, and a hash keeps the name unique
+    star = name("overload", "dotnet-operator-*-1", used)
+    slash = name("overload", "dotnet-operator-/-1", used)
+    assert star.startswith("overload__dotnet-operator-_-1-")
+    assert slash.startswith("overload__dotnet-operator-_-1-")
+    assert star != slash
+    assert "*" not in star
+
+    # Anchors that differ only in case do not collide on a case-insensitive file system
+    minus = name("linexpr", "_CPPv4N10GRBLinExprmiERK10GRBLinExpr", used)
+    minus_equal = name("linexpr", "_CPPv4N10GRBLinExprmIERK10GRBLinExpr", used)
+    assert minus == "linexpr___CPPv4N10GRBLinExprmiERK10GRBLinExpr"
+    assert minus_equal != minus
+    assert minus_equal.lower() != minus.lower()
+
+    # The same anchor always gives the same name
+    assert name("overload", "dotnet-operator-*-1", set()) == star
+
+    # Very long anchors are shortened
+    long_name = name("page", "x" * 500, set())
+    assert len(long_name) < 140
